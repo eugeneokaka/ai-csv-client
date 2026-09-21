@@ -6,13 +6,17 @@ import { toast } from "sonner";
 import type { FileProfile } from "@/lib/api-client";
 import {
   askQuestion,
+  createSession,
   deleteFile,
+  deleteSession,
   getHistory,
   getOutputs,
   getProfile,
   listFiles,
+  listSessions,
   uploadFiles,
 } from "@/lib/api-client";
+import { authClient } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
@@ -59,10 +63,11 @@ interface SavedSession {
   title: string;
 }
 
-const SESSIONS_KEY = "csv-analyzer-sessions";
-
 export default function ChatPage() {
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const { data: session } = authClient.useSession();
+  const userId = session?.user?.id ?? "";
+
+  const [chatId, setChatId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SavedSession[]>([]);
   const [files, setFiles] = useState<FileCard[]>([]);
   const [previewFile, setPreviewFile] = useState<FileCard | null>(null);
@@ -92,34 +97,43 @@ export default function ChatPage() {
     setLogs((prev) => [...prev.slice(-50), { time, type, text }]);
   }, []);
 
-  // Load saved session list on mount (or create a first one)
+  // Load chats from API on mount, create one if none exist
   useEffect(() => {
-    const saved = localStorage.getItem(SESSIONS_KEY);
-    const list: SavedSession[] = saved ? JSON.parse(saved) : [];
-    if (list.length > 0) {
-      setSessions(list);
-      const last = list[0];
-      setSessionId(last.id);
-    } else {
-      const id = crypto.randomUUID();
-      const initial = { id, title: `Session ${new Date().toLocaleString()}` };
-      setSessions([initial]);
-      localStorage.setItem(SESSIONS_KEY, JSON.stringify([initial]));
-      setSessionId(id);
-    }
-  }, []);
-
-  // Load file list + chat history for the active session
-  useEffect(() => {
-    if (!sessionId) return;
+    if (!userId) return;
     let cancelled = false;
     const load = async () => {
       try {
-        const names = await listFiles(sessionId);
+        const chats = await listSessions(userId);
+        if (cancelled) return;
+        if (chats.length > 0) {
+          setSessions(chats);
+          setChatId(chats[0].id);
+        } else {
+          // Create first chat
+          const created = await createSession(userId, `Chat ${new Date().toLocaleString()}`);
+          if (cancelled) return;
+          setSessions([{ id: created.id, title: created.title }]);
+          setChatId(created.id);
+        }
+      } catch {
+        // server may not be running yet
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
+  }, [userId]);
+
+  // Load file list + chat history for the active chat
+  useEffect(() => {
+    if (!chatId) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const names = await listFiles(chatId);
         if (cancelled) return;
         const cards: FileCard[] = [];
         for (const name of names) {
-          const profile = await getProfile(sessionId, name).catch(() => undefined);
+          const profile = await getProfile(chatId, name).catch(() => undefined);
           cards.push({ name, profile });
         }
         setFiles(cards);
@@ -127,12 +141,23 @@ export default function ChatPage() {
         // server may not be running yet — leave files empty
       }
       try {
-        const hist = await getHistory(sessionId);
+        const hist = await getHistory(chatId);
         if (cancelled) return;
         setMessages(
           hist.messages.map((m) => ({
             role: m.role === "user" ? ("user" as const) : ("assistant" as const),
             text: m.text,
+            images: m.files
+              ?.filter((f) => f.media_type === "image/png")
+              .map((f) => `data:${f.media_type};base64,${f.content_base64}`),
+            downloads: m.files
+              ?.filter((f) => f.media_type !== "image/png")
+              .map((f) => ({
+                name: f.name,
+                media_type: f.media_type,
+                url: `data:application/octet-stream;base64,${f.content_base64}`,
+              })),
+            duration: m.duration_s,
           }))
         );
       } catch {
@@ -143,7 +168,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [chatId]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -151,7 +176,7 @@ export default function ChatPage() {
 
   const handleUpload = useCallback(
     async (picked: File[] | null) => {
-      if (!sessionId) return;
+      if (!chatId) return;
       const csvs = (picked ?? []).filter((f) =>
         f.name.toLowerCase().endsWith(".csv")
       );
@@ -164,12 +189,12 @@ export default function ChatPage() {
       setUploading(true);
       log("info", `Uploading ${csvs.length} file(s)...`);
       try {
-        const uploaded = await uploadFiles(sessionId, csvs);
+        const uploaded = await uploadFiles(chatId, csvs);
         log("success", `Uploaded: ${uploaded.join(", ")}`);
         toast.success(`Uploaded ${uploaded.length} file(s)`);
         const cards: FileCard[] = [];
         for (const name of uploaded) {
-          const profile = await getProfile(sessionId, name).catch(() => undefined);
+          const profile = await getProfile(chatId, name).catch(() => undefined);
           if (!cards.some((c) => c.name === name)) cards.push({ name, profile });
         }
         setFiles((prev) => [...prev.filter((c) => !cards.some((n) => n.name === c.name)), ...cards]);
@@ -182,7 +207,7 @@ export default function ChatPage() {
         setUploading(false);
       }
     },
-    [sessionId, log],
+    [chatId, log],
   );
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -264,30 +289,56 @@ export default function ChatPage() {
     }
   };
 
-  const newSession = () => {
-    const id = crypto.randomUUID();
-    const s = { id, title: `Session ${new Date().toLocaleString()}` };
-    const next = [s, ...sessions];
-    setSessions(next);
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(next));
-    setSessionId(id);
-    setMessages([]);
-    setFiles([]);
-    toast.success(`New session created (${id.slice(0, 8)})`);
+  const newSession = async () => {
+    if (!userId) return;
+    try {
+      const created = await createSession(userId, `Chat ${new Date().toLocaleString()}`);
+      const s = { id: created.id, title: created.title };
+      setSessions((prev) => [s, ...prev]);
+      setChatId(created.id);
+      setMessages([]);
+      setFiles([]);
+      toast.success(`New chat created`);
+    } catch (err) {
+      toast.error(`Failed to create chat: ${String(err)}`);
+    }
   };
 
   const switchSession = (id: string) => {
-    if (id === sessionId) return;
-    setSessionId(id);
+    if (id === chatId) return;
+    setChatId(id);
     setMessages([]);
     setFiles([]);
-    toast.success(`Switched to session ${id.slice(0, 8)}`);
+  };
+
+  const handleDeleteSession = async (id: string) => {
+    try {
+      await deleteSession(id);
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+      if (chatId === id) {
+        setChatId(null);
+        setMessages([]);
+        setFiles([]);
+        // Switch to first remaining chat or create new
+        const remaining = sessions.filter((s) => s.id !== id);
+        if (remaining.length > 0) {
+          setChatId(remaining[0].id);
+        } else if (userId) {
+          const created = await createSession(userId, `Chat ${new Date().toLocaleString()}`);
+          setSessions([{ id: created.id, title: created.title }]);
+          setChatId(created.id);
+        }
+      }
+      toast.success("Chat deleted");
+    } catch (err) {
+      toast.error(`Failed to delete chat: ${String(err)}`);
+    }
   };
 
   const handleDeleteFile = async (name: string) => {
-    if (!sessionId) return;
+    if (!chatId) return;
     try {
-      await deleteFile(sessionId, name);
+      await deleteFile(chatId, name);
       setFiles((prev) => prev.filter((f) => f.name !== name));
       toast.success(`Deleted ${name}`);
     } catch (err) {
@@ -297,13 +348,13 @@ export default function ChatPage() {
 
   const sendMessage = async () => {
     const question = input.trim();
-    if (!question || loading || !sessionId) return;
+    if (!question || loading || !chatId) return;
     setInput("");
     setMessages((prev) => [...prev, { role: "user", text: question }]);
     setLoading(true);
     log("info", `Asking: ${question.slice(0, 60)}...`);
     try {
-      const res = await askQuestion(sessionId, question);
+      const res = await askQuestion(chatId, question);
       const images = res.files
         .filter((f) => f.media_type === "image/png")
         .map((f) => `data:${f.media_type};base64,${f.content_base64}`);
@@ -349,7 +400,7 @@ export default function ChatPage() {
             AI CSV Analyzer
           </Link>
           <div className="flex items-center gap-2">
-            <Select value={sessionId ?? undefined} onValueChange={switchSession}>
+            <Select value={chatId ?? undefined} onValueChange={switchSession}>
               <SelectTrigger className="w-64">
                 <SelectValue placeholder="Select session" />
               </SelectTrigger>

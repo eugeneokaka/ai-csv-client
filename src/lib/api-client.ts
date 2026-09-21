@@ -12,6 +12,8 @@ export interface AskResponse {
 export interface HistoryMessage {
   role: string;
   text: string;
+  files?: { name: string; media_type: string; content_base64: string }[];
+  duration_s?: number;
 }
 
 export interface HistoryResponse {
@@ -28,7 +30,22 @@ export interface FileProfile {
   preview: Record<string, unknown>[];
 }
 
+export interface ChatSession {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OutputFile {
+  name: string;
+  media_type: string;
+  content_base64: string;
+}
+
 export const getApiUrl = () => API_URL;
+
+// --- Upload ---
 
 export async function uploadFiles(
   sessionId: string,
@@ -64,22 +81,6 @@ export async function getProfile(
   return res.json();
 }
 
-export async function askQuestion(
-  sessionId: string,
-  question: string,
-): Promise<AskResponse> {
-  const res = await fetch(`${API_URL}/chat/ask`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, question }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Ask failed: ${res.status} ${text}`);
-  }
-  return res.json();
-}
-
 export async function deleteFile(
   sessionId: string,
   filename: string,
@@ -91,20 +92,72 @@ export async function deleteFile(
   if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
 }
 
-export async function getHistory(sessionId: string): Promise<HistoryResponse> {
-  const res = await fetch(`${API_URL}/chat/history?session_id=${encodeURIComponent(sessionId)}`);
-  if (!res.ok) throw new Error(`History failed: ${res.status}`);
+// --- Chat ---
+
+export async function askQuestion(
+  chatId: string,
+  question: string,
+): Promise<AskResponse> {
+  const res = await fetch(`${API_URL}/chat/ask`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, question }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Ask failed: ${res.status} ${text}`);
+  }
   return res.json();
 }
 
-export interface OutputFile {
-  name: string;
-  media_type: string;
-  content_base64: string;
+export async function getHistory(chatId: string): Promise<HistoryResponse> {
+  const res = await fetch(`${API_URL}/chat/history?chat_id=${encodeURIComponent(chatId)}`);
+  if (!res.ok) throw new Error(`History failed: ${res.status}`);
+  return res.json();
 }
 
 export async function getOutputs(): Promise<OutputFile[]> {
   const res = await fetch(`${API_URL}/chat/outputs`);
   if (!res.ok) throw new Error(`Outputs failed: ${res.status}`);
   return (await res.json()).files;
+}
+
+// --- Sessions (v2) ---
+
+export async function listSessions(userId: string): Promise<ChatSession[]> {
+  const res = await fetch(`${API_URL}/chat/sessions?user_id=${encodeURIComponent(userId)}`);
+  if (!res.ok) throw new Error(`List sessions failed: ${res.status}`);
+  return (await res.json()).sessions;
+}
+
+export async function createSession(
+  userId: string,
+  title?: string,
+): Promise<{ id: string; title: string }> {
+  const res = await fetch(`${API_URL}/chat/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, title }),
+  });
+  if (!res.ok) throw new Error(`Create session failed: ${res.status}`);
+  return res.json();
+}
+
+export async function updateSession(
+  chatId: string,
+  title: string,
+): Promise<void> {
+  const res = await fetch(`${API_URL}/chat/sessions/${chatId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(`Update session failed: ${res.status}`);
+}
+
+export async function deleteSession(chatId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/chat/sessions/${chatId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`Delete session failed: ${res.status}`);
 }
