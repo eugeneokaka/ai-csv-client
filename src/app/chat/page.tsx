@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import type { FileProfile } from "@/lib/api-client";
+import type { FileProfile, AllFile } from "@/lib/api-client";
 import {
   askQuestion,
   createSession,
   deleteFile,
   deleteSession,
+  getAllFiles,
   getHistory,
   getOutputs,
   getProfile,
@@ -35,7 +36,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { FileText, Plus, Send, Table2, Trash2, Upload } from "lucide-react";
+import { Download, FileText, Image, Plus, Send, Table2, Trash2, Upload } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 interface ChatMessage {
@@ -49,6 +50,7 @@ interface ChatMessage {
 
 interface FileCard {
   name: string;
+  source: "uploads" | "output";
   profile?: FileProfile;
 }
 
@@ -70,6 +72,7 @@ export default function ChatPage() {
   const [chatId, setChatId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SavedSession[]>([]);
   const [files, setFiles] = useState<FileCard[]>([]);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<FileCard | null>(null);
   const [previewTextTable, setPreviewTextTable] = useState<{
     name: string;
@@ -129,14 +132,20 @@ export default function ChatPage() {
     let cancelled = false;
     const load = async () => {
       try {
-        const names = await listFiles(chatId);
+        const allFiles = await getAllFiles();
         if (cancelled) return;
-        const cards: FileCard[] = [];
-        for (const name of names) {
-          const profile = await getProfile(chatId, name).catch(() => undefined);
-          cards.push({ name, profile });
-        }
+        const cards: FileCard[] = allFiles.map((f) => ({
+          name: f.name,
+          source: f.source,
+        }));
         setFiles(cards);
+        // Auto-select latest output file if any
+        const latestOutput = allFiles.find((f) => f.source === "output");
+        if (latestOutput) {
+          setSelectedFile(latestOutput.name);
+        } else {
+          setSelectedFile(null);
+        }
       } catch {
         // server may not be running yet — leave files empty
       }
@@ -298,6 +307,7 @@ export default function ChatPage() {
       setChatId(created.id);
       setMessages([]);
       setFiles([]);
+      setSelectedFile(null);
       toast.success(`New chat created`);
     } catch (err) {
       toast.error(`Failed to create chat: ${String(err)}`);
@@ -354,7 +364,7 @@ export default function ChatPage() {
     setLoading(true);
     log("info", `Asking: ${question.slice(0, 60)}...`);
     try {
-      const res = await askQuestion(chatId, question);
+      const res = await askQuestion(chatId, question, selectedFile ?? undefined);
       const images = res.files
         .filter((f) => f.media_type === "image/png")
         .map((f) => `data:${f.media_type};base64,${f.content_base64}`);
@@ -461,44 +471,92 @@ export default function ChatPage() {
             <p className="text-destructive text-xs">{uploadError}</p>
           )}
 
-          <div className="flex flex-col gap-2">
-            {files.map((f) => (
-              <Card key={f.name}>
-                <CardContent className="flex items-center gap-2 px-3 py-2">
-                  <button
-                    onClick={() => void handleFilePreview(f)}
-                    className="text-primary shrink-0"
-                    title="Preview"
-                  >
-                    <Table2 className="size-4" />
-                  </button>
-                  <button
-                    onClick={() => void handleFilePreview(f)}
-                    className="flex-1 truncate text-left text-sm"
-                    title={f.name}
-                  >
-                    {f.name}
-                  </button>
-                  {f.profile && (
-                    <span className="text-muted-foreground text-xs">
-                      {f.profile.rows} rows
-                    </span>
-                  )}
-                  <button
-                    onClick={() => void handleDeleteFile(f.name)}
-                    className="text-muted-foreground shrink-0 hover:text-destructive"
-                    title="Delete file"
-                  >
-                    <Trash2 className="size-3.5" />
-                  </button>
-                </CardContent>
-              </Card>
-            ))}
+          <div className="flex flex-1 flex-col gap-2 overflow-hidden">
+            <div className="scroll-green flex flex-1 flex-col gap-2 overflow-y-auto">
+            {files.map((f) => {
+              const isImage = f.name.endsWith(".png") || f.name.endsWith(".jpg") || f.name.endsWith(".jpeg");
+              const isExcel = f.name.endsWith(".xlsx") || f.name.endsWith(".xls");
+              return (
+                <Card
+                  key={f.name}
+                  className={`cursor-pointer transition-colors ${
+                    selectedFile === f.name
+                      ? "border-primary bg-primary/5"
+                      : "hover:bg-muted/50"
+                  }`}
+                  onClick={() => setSelectedFile(f.name)}
+                >
+                  <CardContent className="flex items-center gap-2 px-3 py-2">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleFilePreview(f);
+                      }}
+                      className="text-primary shrink-0"
+                      title="Preview"
+                    >
+                      {isImage ? (
+                        <Image className="size-4" />
+                      ) : isExcel ? (
+                        <FileText className="size-4" />
+                      ) : (
+                        <Table2 className="size-4" />
+                      )}
+                    </button>
+                    <div className="flex-1 truncate text-left">
+                      <span className="text-sm">{f.name}</span>
+                      <span className="text-muted-foreground ml-1 text-[10px]">
+                        ({f.source})
+                      </span>
+                    </div>
+                    {isImage && (
+                      <span className="bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 rounded px-1.5 py-0.5 text-[10px]">
+                        image
+                      </span>
+                    )}
+                    {isExcel && (
+                      <span className="bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 rounded px-1.5 py-0.5 text-[10px]">
+                        excel
+                      </span>
+                    )}
+                    {selectedFile === f.name && (
+                      <span className="text-primary text-xs">selected</span>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Download file from API
+                        const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+                        const a = document.createElement("a");
+                        a.href = `${API_URL}/chat/download/${encodeURIComponent(f.name)}`;
+                        a.download = f.name;
+                        a.click();
+                      }}
+                      className="text-muted-foreground shrink-0 hover:text-foreground"
+                      title="Download file"
+                    >
+                      <Download className="size-3.5" />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleDeleteFile(f.name);
+                      }}
+                      className="text-muted-foreground shrink-0 hover:text-destructive"
+                      title="Delete file"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </CardContent>
+                </Card>
+              );
+            })}
             {files.length === 0 && !uploading && (
               <p className="text-muted-foreground text-center text-xs">
                 No files yet
               </p>
             )}
+            </div>
           </div>
 
           <div className="mt-auto flex flex-col">

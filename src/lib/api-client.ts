@@ -97,11 +97,12 @@ export async function deleteFile(
 export async function askQuestion(
   chatId: string,
   question: string,
+  selectedFile?: string,
 ): Promise<AskResponse> {
   const res = await fetch(`${API_URL}/chat/ask`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, question }),
+    body: JSON.stringify({ chat_id: chatId, question, selected_file: selectedFile }),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -119,6 +120,17 @@ export async function getHistory(chatId: string): Promise<HistoryResponse> {
 export async function getOutputs(): Promise<OutputFile[]> {
   const res = await fetch(`${API_URL}/chat/outputs`);
   if (!res.ok) throw new Error(`Outputs failed: ${res.status}`);
+  return (await res.json()).files;
+}
+
+export interface AllFile {
+  name: string;
+  source: "uploads" | "output";
+}
+
+export async function getAllFiles(): Promise<AllFile[]> {
+  const res = await fetch(`${API_URL}/chat/files`);
+  if (!res.ok) throw new Error(`Get all files failed: ${res.status}`);
   return (await res.json()).files;
 }
 
