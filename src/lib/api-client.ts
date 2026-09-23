@@ -1,4 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export interface AskResponse {
   stdout: string;
@@ -55,6 +55,7 @@ export async function uploadFiles(
   files.forEach((f) => form.append("files", f));
   const res = await fetch(`${API_URL}/upload/${sessionId}`, {
     method: "POST",
+    credentials: "include",
     body: form,
   });
   if (!res.ok) {
@@ -65,7 +66,9 @@ export async function uploadFiles(
 }
 
 export async function listFiles(sessionId: string): Promise<string[]> {
-  const res = await fetch(`${API_URL}/upload/${sessionId}`);
+  const res = await fetch(`${API_URL}/upload/${sessionId}`, {
+    credentials: "include",
+  });
   if (!res.ok) throw new Error(`List files failed: ${res.status}`);
   return (await res.json()).files as string[];
 }
@@ -76,6 +79,7 @@ export async function getProfile(
 ): Promise<FileProfile> {
   const res = await fetch(
     `${API_URL}/upload/${sessionId}/profile/${encodeURIComponent(filename)}`,
+    { credentials: "include" },
   );
   if (!res.ok) throw new Error(`Profile failed: ${res.status}`);
   return res.json();
@@ -87,7 +91,7 @@ export async function deleteFile(
 ): Promise<void> {
   const res = await fetch(
     `${API_URL}/upload/${sessionId}/${encodeURIComponent(filename)}`,
-    { method: "DELETE" },
+    { method: "DELETE", credentials: "include" },
   );
   if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
 }
@@ -101,6 +105,7 @@ export async function askQuestion(
 ): Promise<AskResponse> {
   const res = await fetch(`${API_URL}/chat/ask`, {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, question, selected_file: selectedFile }),
   });
@@ -112,13 +117,18 @@ export async function askQuestion(
 }
 
 export async function getHistory(chatId: string): Promise<HistoryResponse> {
-  const res = await fetch(`${API_URL}/chat/history?chat_id=${encodeURIComponent(chatId)}`);
+  const res = await fetch(`${API_URL}/chat/history?chat_id=${encodeURIComponent(chatId)}`, {
+    credentials: "include",
+  });
   if (!res.ok) throw new Error(`History failed: ${res.status}`);
   return res.json();
 }
 
-export async function getOutputs(): Promise<OutputFile[]> {
-  const res = await fetch(`${API_URL}/chat/outputs`);
+export async function getOutputs(chatId: string): Promise<OutputFile[]> {
+  const res = await fetch(
+    `${API_URL}/chat/outputs?chat_id=${encodeURIComponent(chatId)}`,
+    { credentials: "include" },
+  );
   if (!res.ok) throw new Error(`Outputs failed: ${res.status}`);
   return (await res.json()).files;
 }
@@ -128,28 +138,42 @@ export interface AllFile {
   source: "uploads" | "output";
 }
 
-export async function getAllFiles(): Promise<AllFile[]> {
-  const res = await fetch(`${API_URL}/chat/files`);
+export async function getAllFiles(chatId: string): Promise<AllFile[]> {
+  const res = await fetch(
+    `${API_URL}/chat/files?chat_id=${encodeURIComponent(chatId)}`,
+    { credentials: "include" },
+  );
   if (!res.ok) throw new Error(`Get all files failed: ${res.status}`);
   return (await res.json()).files;
 }
 
+export async function downloadFile(filename: string, chatId: string): Promise<Blob> {
+  const res = await fetch(
+    `${API_URL}/chat/download/${encodeURIComponent(filename)}?chat_id=${encodeURIComponent(chatId)}`,
+    { credentials: "include" },
+  );
+  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+  return res.blob();
+}
+
 // --- Sessions (v2) ---
 
-export async function listSessions(userId: string): Promise<ChatSession[]> {
-  const res = await fetch(`${API_URL}/chat/sessions?user_id=${encodeURIComponent(userId)}`);
+export async function listSessions(): Promise<ChatSession[]> {
+  const res = await fetch(`${API_URL}/chat/sessions`, {
+    credentials: "include",
+  });
   if (!res.ok) throw new Error(`List sessions failed: ${res.status}`);
   return (await res.json()).sessions;
 }
 
 export async function createSession(
-  userId: string,
   title?: string,
 ): Promise<{ id: string; title: string }> {
   const res = await fetch(`${API_URL}/chat/sessions`, {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: userId, title }),
+    body: JSON.stringify({ title }),
   });
   if (!res.ok) throw new Error(`Create session failed: ${res.status}`);
   return res.json();
@@ -161,6 +185,7 @@ export async function updateSession(
 ): Promise<void> {
   const res = await fetch(`${API_URL}/chat/sessions/${chatId}`, {
     method: "PUT",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
   });
@@ -170,6 +195,7 @@ export async function updateSession(
 export async function deleteSession(chatId: string): Promise<void> {
   const res = await fetch(`${API_URL}/chat/sessions/${chatId}`, {
     method: "DELETE",
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`Delete session failed: ${res.status}`);
 }

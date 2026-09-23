@@ -9,6 +9,7 @@ import {
   createSession,
   deleteFile,
   deleteSession,
+  downloadFile,
   getAllFiles,
   getHistory,
   getOutputs,
@@ -100,20 +101,32 @@ export default function ChatPage() {
     setLogs((prev) => [...prev.slice(-50), { time, type, text }]);
   }, []);
 
+  // Reload the sidebar file list for a chat and auto-select the latest output.
+  const refreshFiles = useCallback(async (cid: string) => {
+    try {
+      const allFiles = await getAllFiles(cid);
+      setFiles(allFiles.map((f) => ({ name: f.name, source: f.source })));
+      const latestOutput = allFiles.find((f) => f.source === "output");
+      setSelectedFile(latestOutput ? latestOutput.name : null);
+    } catch {
+      // server may not be running yet — leave files as-is
+    }
+  }, []);
+
   // Load chats from API on mount, create one if none exist
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
     const load = async () => {
       try {
-        const chats = await listSessions(userId);
+        const chats = await listSessions();
         if (cancelled) return;
         if (chats.length > 0) {
           setSessions(chats);
           setChatId(chats[0].id);
         } else {
           // Create first chat
-          const created = await createSession(userId, `Chat ${new Date().toLocaleString()}`);
+          const created = await createSession(`Chat ${new Date().toLocaleString()}`);
           if (cancelled) return;
           setSessions([{ id: created.id, title: created.title }]);
           setChatId(created.id);
@@ -131,24 +144,8 @@ export default function ChatPage() {
     if (!chatId) return;
     let cancelled = false;
     const load = async () => {
-      try {
-        const allFiles = await getAllFiles();
-        if (cancelled) return;
-        const cards: FileCard[] = allFiles.map((f) => ({
-          name: f.name,
-          source: f.source,
-        }));
-        setFiles(cards);
-        // Auto-select latest output file if any
-        const latestOutput = allFiles.find((f) => f.source === "output");
-        if (latestOutput) {
-          setSelectedFile(latestOutput.name);
-        } else {
-          setSelectedFile(null);
-        }
-      } catch {
-        // server may not be running yet — leave files empty
-      }
+      await refreshFiles(chatId);
+      if (cancelled) return;
       try {
         const hist = await getHistory(chatId);
         if (cancelled) return;
@@ -177,7 +174,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [chatId]);
+  }, [chatId, refreshFiles]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -204,7 +201,8 @@ export default function ChatPage() {
         const cards: FileCard[] = [];
         for (const name of uploaded) {
           const profile = await getProfile(chatId, name).catch(() => undefined);
-          if (!cards.some((c) => c.name === name)) cards.push({ name, profile });
+          if (!cards.some((c) => c.name === name))
+            cards.push({ name, source: "uploads", profile });
         }
         setFiles((prev) => [...prev.filter((c) => !cards.some((n) => n.name === c.name)), ...cards]);
       } catch (err) {
@@ -284,8 +282,9 @@ export default function ChatPage() {
   const handleFilePreview = async (f: FileCard) => {
     setPreviewFile(f);
     setEditedPreviews([]);
+    if (!chatId) return;
     try {
-      const outputs = await getOutputs();
+      const outputs = await getOutputs(chatId);
       const csvOutputs = outputs.filter((o) => o.name.toLowerCase().endsWith(".csv"));
       const parsed = csvOutputs.map((o) => {
         const text = atob(o.content_base64);
@@ -301,7 +300,7 @@ export default function ChatPage() {
   const newSession = async () => {
     if (!userId) return;
     try {
-      const created = await createSession(userId, `Chat ${new Date().toLocaleString()}`);
+      const created = await createSession(`Chat ${new Date().toLocaleString()}`);
       const s = { id: created.id, title: created.title };
       setSessions((prev) => [s, ...prev]);
       setChatId(created.id);
@@ -334,7 +333,7 @@ export default function ChatPage() {
         if (remaining.length > 0) {
           setChatId(remaining[0].id);
         } else if (userId) {
-          const created = await createSession(userId, `Chat ${new Date().toLocaleString()}`);
+          const created = await createSession(`Chat ${new Date().toLocaleString()}`);
           setSessions([{ id: created.id, title: created.title }]);
           setChatId(created.id);
         }
@@ -399,6 +398,8 @@ export default function ChatPage() {
       ]);
     } finally {
       setLoading(false);
+      // Surface any files the agent just created in the sidebar, no refresh needed
+      if (chatId) void refreshFiles(chatId);
     }
   };
 
@@ -432,7 +433,7 @@ export default function ChatPage() {
 
       <div className="mx-auto flex w-full max-w-6xl flex-1 gap-4 overflow-hidden p-4">
         {/* Upload sidebar */}
-        <aside className="flex w-72 flex-col gap-3">
+        <aside className="flex h-full min-h-0 w-72 flex-col gap-3 overflow-hidden">
           <div
             onDragOver={handleDragOver}
             onDragLeave={() => setDragActive(false)}
@@ -471,15 +472,15 @@ export default function ChatPage() {
             <p className="text-destructive text-xs">{uploadError}</p>
           )}
 
-          <div className="flex flex-1 flex-col gap-2 overflow-hidden">
-            <div className="scroll-green flex flex-1 flex-col gap-2 overflow-y-auto">
+          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
+            <div className="scroll-green flex min-h-0 flex-1 flex-col gap-2 overflow-y-scroll pr-1">
             {files.map((f) => {
               const isImage = f.name.endsWith(".png") || f.name.endsWith(".jpg") || f.name.endsWith(".jpeg");
               const isExcel = f.name.endsWith(".xlsx") || f.name.endsWith(".xls");
               return (
                 <Card
                   key={f.name}
-                  className={`cursor-pointer transition-colors ${
+                  className={`shrink-0 cursor-pointer transition-colors ${
                     selectedFile === f.name
                       ? "border-primary bg-primary/5"
                       : "hover:bg-muted/50"
@@ -525,12 +526,17 @@ export default function ChatPage() {
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        // Download file from API
-                        const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
-                        const a = document.createElement("a");
-                        a.href = `${API_URL}/chat/download/${encodeURIComponent(f.name)}`;
-                        a.download = f.name;
-                        a.click();
+                        if (!chatId) return;
+                        void downloadFile(f.name, chatId)
+                          .then((blob) => {
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = f.name;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                          })
+                          .catch((err) => toast.error(String(err)));
                       }}
                       className="text-muted-foreground shrink-0 hover:text-foreground"
                       title="Download file"
