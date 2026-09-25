@@ -14,6 +14,7 @@ import {
   getHistory,
   getOutputs,
   getProfile,
+  getWorkerLoad,
   listFiles,
   listSessions,
   uploadFiles,
@@ -47,6 +48,7 @@ interface ChatMessage {
   downloads?: { name: string; media_type: string; url: string }[];
   duration?: number;
   error?: string;
+  status?: "queued" | "running";
 }
 
 interface FileCard {
@@ -72,6 +74,9 @@ export default function ChatPage() {
 
   const [chatId, setChatId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SavedSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [filesLoading, setFilesLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [files, setFiles] = useState<FileCard[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<FileCard | null>(null);
@@ -117,6 +122,7 @@ export default function ChatPage() {
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
+    setSessionsLoading(true);
     const load = async () => {
       try {
         const chats = await listSessions();
@@ -133,6 +139,8 @@ export default function ChatPage() {
         }
       } catch {
         // server may not be running yet
+      } finally {
+        if (!cancelled) setSessionsLoading(false);
       }
     };
     void load();
@@ -143,9 +151,12 @@ export default function ChatPage() {
   useEffect(() => {
     if (!chatId) return;
     let cancelled = false;
+    setFilesLoading(true);
+    setHistoryLoading(true);
     const load = async () => {
       await refreshFiles(chatId);
       if (cancelled) return;
+      setFilesLoading(false);
       try {
         const hist = await getHistory(chatId);
         if (cancelled) return;
@@ -168,6 +179,8 @@ export default function ChatPage() {
         );
       } catch {
         // history is best-effort
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
       }
     };
     void load();
@@ -307,6 +320,8 @@ export default function ChatPage() {
       setMessages([]);
       setFiles([]);
       setSelectedFile(null);
+      setFilesLoading(true);
+      setHistoryLoading(true);
       toast.success(`New chat created`);
     } catch (err) {
       toast.error(`Failed to create chat: ${String(err)}`);
@@ -318,6 +333,8 @@ export default function ChatPage() {
     setChatId(id);
     setMessages([]);
     setFiles([]);
+    setFilesLoading(true);
+    setHistoryLoading(true);
   };
 
   const handleDeleteSession = async (id: string) => {
@@ -355,13 +372,48 @@ export default function ChatPage() {
     }
   };
 
+  const setTrailingStatus = (status: "queued" | "running") => {
+    setMessages((prev) => {
+      const next = [...prev];
+      for (let i = next.length - 1; i >= 0; i--) {
+        if (next[i].role === "assistant" && next[i].status) {
+          next[i] = { ...next[i], status };
+          break;
+        }
+      }
+      return next;
+    });
+  };
+
   const sendMessage = async () => {
     const question = input.trim();
     if (!question || loading || !chatId) return;
     setInput("");
-    setMessages((prev) => [...prev, { role: "user", text: question }]);
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", text: question },
+      { role: "assistant", text: "", status: "queued" },
+    ]);
     setLoading(true);
     log("info", `Asking: ${question.slice(0, 60)}...`);
+
+    // Poll the worker pool while the request is in flight so the bubble can
+    // show "Queued..." (waiting for a slot) vs "Processing..." (running now).
+    let pollActive = true;
+    const pollLoad = async () => {
+      while (pollActive) {
+        try {
+          const load = await getWorkerLoad();
+          const status = load.busy ? "queued" : "running";
+          setTrailingStatus(status);
+        } catch {
+          // ignore — keep the current label
+        }
+        await new Promise((r) => setTimeout(r, 800));
+      }
+    };
+    void pollLoad();
+
     try {
       const res = await askQuestion(chatId, question, selectedFile ?? undefined);
       const images = res.files
@@ -374,31 +426,46 @@ export default function ChatPage() {
           media_type: f.media_type,
           url: `data:application/octet-stream;base64,${f.content_base64}`,
         }));
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant" as const,
-          text: res.stdout || res.stderr || "(no output)",
-          images,
-          downloads,
-          duration: res.duration_s,
-          error: res.stderr && !res.stdout ? res.stderr : undefined,
-        },
-      ]);
+      setMessages((prev) => {
+        const next = [...prev];
+        // Replace the trailing placeholder bubble with the real answer.
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].role === "assistant" && next[i].status) {
+            next[i] = {
+              role: "assistant",
+              text: res.stdout || res.stderr || "(no output)",
+              images,
+              downloads,
+              duration: res.duration_s,
+              error: res.stderr && !res.stdout ? res.stderr : undefined,
+            };
+            break;
+          }
+        }
+        return next;
+      });
       log(
-        res.stderr && !res.stdout ? "error" : "success",
-        `Reply in ${res.duration_s.toFixed(1)}s (${res.files.length} file(s))`,
+        res.status === "queued" ? "info" : res.stderr && !res.stdout ? "error" : "success",
+        res.status === "queued"
+          ? `Was queued — replied in ${res.duration_s.toFixed(1)}s`
+          : `Reply in ${res.duration_s.toFixed(1)}s (${res.files.length} file(s))`,
       );
     } catch (err) {
       log("error", `Ask failed: ${String(err)}`);
       toast.error(String(err));
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: "", error: String(err) },
-      ]);
+      setMessages((prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].role === "assistant" && next[i].status) {
+            next[i] = { role: "assistant", text: "", error: String(err) };
+            break;
+          }
+        }
+        return next;
+      });
     } finally {
+      pollActive = false;
       setLoading(false);
-      // Surface any files the agent just created in the sidebar, no refresh needed
       if (chatId) void refreshFiles(chatId);
     }
   };
@@ -411,18 +478,25 @@ export default function ChatPage() {
             AI CSV Analyzer
           </Link>
           <div className="flex items-center gap-2">
-            <Select value={chatId ?? undefined} onValueChange={switchSession}>
-              <SelectTrigger className="w-64">
-                <SelectValue placeholder="Select session" />
-              </SelectTrigger>
-              <SelectContent>
-                {sessions.map((s) => (
-                  <SelectItem key={s.id} value={s.id}>
-                    {s.title}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {sessionsLoading ? (
+              <div className="text-muted-foreground flex h-9 w-64 items-center gap-2 rounded-md border px-3 text-sm">
+                <Spinner className="size-4" />
+                Loading chats...
+              </div>
+            ) : (
+              <Select value={chatId ?? undefined} onValueChange={switchSession}>
+                <SelectTrigger className="w-64">
+                  <SelectValue placeholder="Select session" />
+                </SelectTrigger>
+                <SelectContent>
+                  {sessions.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.title}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             <Button variant="outline" size="sm" onClick={newSession}>
               <Plus className="size-4" />
               New
@@ -557,7 +631,20 @@ export default function ChatPage() {
                 </Card>
               );
             })}
-            {files.length === 0 && !uploading && (
+            {filesLoading && (
+              <div className="flex flex-col gap-2">
+                {[0, 1, 2].map((i) => (
+                  <div
+                    key={i}
+                    className="flex animate-pulse items-center gap-2 rounded-lg border px-3 py-3"
+                  >
+                    <div className="bg-muted size-4 shrink-0 rounded" />
+                    <div className="bg-muted h-3 flex-1 rounded" />
+                  </div>
+                ))}
+              </div>
+            )}
+            {!filesLoading && files.length === 0 && !uploading && (
               <p className="text-muted-foreground text-center text-xs">
                 No files yet
               </p>
@@ -603,10 +690,17 @@ export default function ChatPage() {
         <section className="flex flex-1 flex-col overflow-hidden rounded-lg border">
           <div className="scroll-green flex-1 overflow-y-auto">
             <div className="flex flex-col gap-3 p-4">
-              {messages.length === 0 && (
-                <p className="text-muted-foreground mt-16 text-center text-sm">
-                  Upload CSVs, then ask a question about them.
-                </p>
+              {historyLoading && messages.length === 0 ? (
+                <div className="text-muted-foreground mt-16 flex flex-col items-center gap-3">
+                  <Spinner className="size-6" />
+                  <p className="text-sm">Loading chat...</p>
+                </div>
+              ) : (
+                messages.length === 0 && (
+                  <p className="text-muted-foreground mt-16 text-center text-sm">
+                    Upload CSVs, then ask a question about them.
+                  </p>
+                )
               )}
               {messages.map((m, i) => (
                 <div
@@ -614,27 +708,34 @@ export default function ChatPage() {
                   className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
                 >
                   <div className={`max-w-[80%] ${m.role === "user" ? "" : "w-full"}`}>
-                    <div
-                      className={`rounded-lg px-4 py-2 text-sm ${
-                        m.role === "user"
-                          ? "bg-primary text-primary-foreground [&_a]:text-primary-foreground [&_a]:underline"
-                          : "bg-muted [&_strong]:font-semibold [&_ul]:my-1 [&_ul]:list-disc [&_ul]:pl-4 [&_li]:my-0.5 [&_code]:bg-background [&_code]:px-1 [&_code]:rounded [&_h4]:font-semibold [&_h5]:font-semibold [&_p]:my-1"
-                      }`}
-                    >
-                      {m.role === "user" ? (
-                        <span className="whitespace-pre-wrap">{m.text}</span>
-                      ) : (
-                        <ReactMarkdown>{m.text}</ReactMarkdown>
-                      )}
-                      {m.error && (
-                        <span className="text-destructive block">{m.error}</span>
-                      )}
-                      {m.duration != null && (
-                        <span className="text-muted-foreground mt-1 block text-xs">
-                          {m.duration.toFixed(1)}s
-                        </span>
-                      )}
-                    </div>
+                    {m.role === "assistant" && m.status ? (
+                      <div className="bg-muted flex items-center gap-2 rounded-lg px-4 py-2 text-sm">
+                        <Spinner className="size-4" />
+                        {m.status === "queued" ? "Queued..." : "Processing..."}
+                      </div>
+                    ) : (
+                      <div
+                        className={`rounded-lg px-4 py-2 text-sm ${
+                          m.role === "user"
+                            ? "bg-primary text-primary-foreground [&_a]:text-primary-foreground [&_a]:underline"
+                            : "bg-muted [&_strong]:font-semibold [&_ul]:my-1 [&_ul]:list-disc [&_ul]:pl-4 [&_li]:my-0.5 [&_code]:bg-background [&_code]:px-1 [&_code]:rounded [&_h4]:font-semibold [&_h5]:font-semibold [&_p]:my-1"
+                        }`}
+                      >
+                        {m.role === "user" ? (
+                          <span className="whitespace-pre-wrap">{m.text}</span>
+                        ) : (
+                          <ReactMarkdown>{m.text}</ReactMarkdown>
+                        )}
+                        {m.error && (
+                          <span className="text-destructive block">{m.error}</span>
+                        )}
+                        {m.duration != null && (
+                          <span className="text-muted-foreground mt-1 block text-xs">
+                            {m.duration.toFixed(1)}s
+                          </span>
+                        )}
+                      </div>
+                    )}
                     {m.images?.map((src, j) => (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
@@ -658,14 +759,6 @@ export default function ChatPage() {
                   </div>
                 </div>
               ))}
-              {loading && (
-                <div className="flex justify-start">
-                  <div className="bg-muted flex items-center gap-2 rounded-lg px-4 py-2 text-sm">
-                    <Spinner className="size-4" />
-                    Analyzing your data...
-                  </div>
-                </div>
-              )}
               <div ref={endRef} />
             </div>
           </div>
@@ -676,9 +769,11 @@ export default function ChatPage() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder={
-                  files.length === 0
-                    ? "Upload a CSV first..."
-                    : "e.g. Average salary by department, as a chart"
+                  filesLoading
+                    ? "Loading..."
+                    : files.length === 0
+                      ? "Upload a CSV first..."
+                      : "e.g. Average salary by department, as a chart"
                 }
                 disabled={files.length === 0 || loading}
                 className="min-h-10 flex-1 resize-none"

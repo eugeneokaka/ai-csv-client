@@ -7,6 +7,7 @@ export interface AskResponse {
   duration_s: number;
   attempts: number;
   opencode_session_id: string | null;
+  status?: string | null;
 }
 
 export interface HistoryMessage {
@@ -116,6 +117,21 @@ export async function askQuestion(
   return res.json();
 }
 
+export interface WorkerLoad {
+  max_workers: number;
+  running: number;
+  queued: number;
+  busy: boolean;
+}
+
+export async function getWorkerLoad(): Promise<WorkerLoad> {
+  const res = await fetch(`${API_URL}/chat/worker-load`, {
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`Worker load failed: ${res.status}`);
+  return res.json();
+}
+
 export async function getHistory(chatId: string): Promise<HistoryResponse> {
   const res = await fetch(`${API_URL}/chat/history?chat_id=${encodeURIComponent(chatId)}`, {
     credentials: "include",
@@ -136,6 +152,8 @@ export async function getOutputs(chatId: string): Promise<OutputFile[]> {
 export interface AllFile {
   name: string;
   source: "uploads" | "output";
+  saved?: boolean;
+  document_id?: string;
 }
 
 export async function getAllFiles(chatId: string): Promise<AllFile[]> {
